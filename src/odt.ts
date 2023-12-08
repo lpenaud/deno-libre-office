@@ -11,9 +11,14 @@ interface RawNode {
   lastIndex: number;
 }
 
+interface ListNodesOptions {
+  start: number;
+}
+
 export interface FindNodesOptions {
   node: string;
   attributes?: NodeAttributes;
+  start?: number;
 }
 
 export interface Node {
@@ -22,6 +27,22 @@ export interface Node {
   index: number;
   endIndex: number;
   inner: string;
+}
+
+export type NodeType =
+  | "text:p"
+  | "text:span"
+  | "table:table"
+  | "table:table-row"
+  | "table:table-cell"
+  | "table:table-column"
+  | "table:table-header-rows";
+
+export interface CreateNodeOptions {
+  node: NodeType;
+  attributes: NodeAttributes;
+  content: string;
+  children: string[];
 }
 
 const LO_ENTITIES: Record<string, string> = {
@@ -96,16 +117,27 @@ export class OpenDocumentText {
   }
 
   async innerXml(
-    find: { node: string; attributes?: Record<string, string> },
+    find: { firstNode: FindNodesOptions; lastNode?: FindNodesOptions },
     inner: string,
   ) {
     const content = await this.readContent();
-    const node = findFirstNode(content, find);
-    if (node === undefined) {
+    const firstNode = findFirstNode(content, find.firstNode);
+    if (firstNode === undefined) {
       console.warn("Node not found", find);
       return;
     }
-    this.#unsafe(content, node, inner);
+    if (find.lastNode === undefined) {
+      this.#unsafe(content, firstNode, inner);
+      return;
+    }
+    const lastNode = findLastNode(content, {
+      ...find.lastNode,
+      start: firstNode.endIndex,
+    });
+    this.#unsafe(content, {
+      index: firstNode.index,
+      endIndex: lastNode === undefined ? firstNode.endIndex : lastNode.endIndex,
+    }, inner);
   }
 
   async readContent() {
@@ -134,9 +166,71 @@ export class OpenDocumentText {
     }
   }
 
-  #unsafe(content: string, node: Node, inner: string) {
-    this.#content = content.substring(0, node.index) + inner +
-      content.substring(node.endIndex);
+  #unsafe(
+    content: string,
+    { index, endIndex }: { index: number; endIndex: number },
+    inner: string,
+  ) {
+    this.#content = content.substring(0, index) + inner +
+      content.substring(endIndex);
+  }
+}
+
+export class NodeFactory implements CreateNodeOptions {
+  #options: CreateNodeOptions;
+
+  get node(): NodeType {
+    return this.#options.node;
+  }
+
+  set node(node: NodeType) {
+    this.#options.node = node;
+  }
+
+  get attributes(): NodeAttributes {
+    return this.#options.attributes;
+  }
+
+  set attributes(attributes: NodeAttributes) {
+    this.#options.attributes = attributes;
+  }
+
+  get content(): string {
+    return this.#options.content;
+  }
+
+  set content(content: string) {
+    this.#options.content = content;
+  }
+
+  get children(): string[] {
+    return this.#options.children;
+  }
+
+  set children(children: string[]) {
+    this.#options.children = children;
+  }
+
+  constructor(options: Partial<CreateNodeOptions> & { node: NodeType }) {
+    this.#options = {
+      attributes: {},
+      children: [],
+      content: "",
+      ...options,
+    };
+  }
+
+  newNode(options?: Partial<CreateNodeOptions> | string) {
+    const { attributes, content, children, node }: CreateNodeOptions =
+      typeof options === "string"
+        ? { ...this.#options, content: options }
+        : { ...this.#options, ...options, attributes: { ...this.#options.attributes, ...options?.attributes } };
+    const attr = Object.entries(attributes)
+      .map(([k, v]) => `${k}="${v}"`)
+      .join(" ");
+    return `<${node} ${attr}>${escapeLibreOffice(content)}${
+      children.join("")
+    }</${node}>`;
   }
 }
 
@@ -144,10 +238,10 @@ export function* findNodes(
   xml: string,
   options: FindNodesOptions,
 ): Generator<Node> {
-  const nodes = listNodes(xml);
+  const nodes = listNodes(xml, options);
   const startNode = findNodeStart(nodes, options);
   const endNode = findNodeEnd(nodes, options);
-  for (; ;) {
+  for (;;) {
     const { value: startValue } = startNode.next();
     if (startValue === undefined) {
       break;
@@ -166,13 +260,24 @@ export function* findNodes(
   }
 }
 
-export function findFirstNode(
+function findFirstNode(
   xml: string,
   options: FindNodesOptions,
 ): Node | undefined {
   for (const node of findNodes(xml, options)) {
     return node;
   }
+}
+
+function findLastNode(
+  xml: string,
+  options: FindNodesOptions,
+): Node | undefined {
+  let last: Node | undefined;
+  for (const node of findNodes(xml, options)) {
+    last = node;
+  }
+  return last;
 }
 
 export function escapeLibreOffice(str: string) {
@@ -218,11 +323,18 @@ function* findNodeEnd(nodes: Iterable<RawNode>, { node }: FindNodesOptions) {
   }
 }
 
-function* listNodes(xml: string): Generator<RawNode> {
+function* listNodes(
+  xml: string,
+  options?: Partial<ListNodesOptions>,
+): Generator<RawNode> {
+  const { start }: ListNodesOptions = {
+    start: 0,
+    ...options,
+  };
   const reNode = /<(\/)?(\w+:[\w-]+)\s*([!-~]+="[ -!#-;=?-~]+"\s*)*(\/)?>/gm;
-  for (const match of multiMatchs(reNode, xml)) {
+  for (const match of multiMatchs(reNode, xml.substring(start))) {
     const [all, end, node, , prematureEnd] = match;
-    const index = match.index as number;
+    const index = start + (match.index as number);
     yield {
       end: end !== undefined || prematureEnd !== undefined,
       node,
