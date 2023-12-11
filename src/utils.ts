@@ -4,9 +4,3 @@ export function* multiMatchs(re: RegExp, content: string) {
     yield match;
   }
 }
-
-export function rmrf(dir: string) {
-  return Deno.remove(dir, {
-    recursive: true,
-  });
-}
