@@ -166,6 +166,15 @@ export class OpenDocumentText {
     }
   }
 
+  /**
+   * Clone the current instance.
+   * Do not copy content.
+   * @returns Clone
+   */
+  clone(): OpenDocumentText {
+    return new OpenDocumentText(this.dir);
+  }
+
   #unsafe(
     content: string,
     { index, endIndex }: { index: number; endIndex: number },
