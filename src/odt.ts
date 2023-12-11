@@ -293,9 +293,9 @@ export function escapeLibreOffice(str: string) {
   return str.replace(LO_RE, (k) => LO_ENTITIES[k] as string);
 }
 
-function listAttributes(str: string): Record<string, string> {
+function listAttributes(str: string): NodeAttributes {
   const re = /([!-~]+)="([ -!#-;=?-~]+)"/gm;
-  const attributes: Record<string, string> = {};
+  const attributes: NodeAttributes = {};
   for (const [, key, value] of multiMatchs(re, str)) {
     attributes[key] = value;
   }
