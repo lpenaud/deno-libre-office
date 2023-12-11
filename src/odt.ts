@@ -55,43 +55,58 @@ const LO_ENTITIES: Record<string, string> = {
   "  ": "<text:tab />",
 };
 const LO_RE = new RegExp(Array.from(Object.keys(LO_ENTITIES)).join("|"), "g");
+const TEMP_DIR = await Deno.makeTempDir({
+  prefix: "deno-lo",
+});
+
+async function readAll(readable: ReadableStream<Uint8Array>) {
+  let content = "";
+  for await (const buf of readable.pipeThrough(new TextDecoderStream())) {
+    content += buf;
+  }
+  return content;
+}
+
+export function escapeLibreOffice(str: string) {
+  return str.replace(LO_RE, (k) => LO_ENTITIES[k] as string);
+}
+
+export function removeTempDir() {
+  return Deno.remove(TEMP_DIR, {
+    recursive: true,
+  });
+}
 
 export class OpenDocumentText {
-  #dir: string;
+  #odt: string;
 
-  #contentPath: string;
-
-  #content: string | undefined;
-
-  get dir() {
-    return this.#dir;
-  }
+  #content: string;
 
   static async fromZip(infile: string): Promise<OpenDocumentText> {
-    const tempDir = await Deno.makeTempDir({
-      prefix: "generate-odt",
-    });
     const command = new Deno.Command("unzip", {
-      args: ["-qd", tempDir, infile],
+      args: ["-qp", infile, "content.xml"],
       stderr: "inherit",
-      stdout: "inherit",
+      stdout: "piped",
       stdin: "null",
     });
-    const status = await command.spawn().status;
+    const process = command.spawn();
+    const [status, content] = await Promise.all([
+      process.status,
+      readAll(process.stdout),
+    ]);
     if (status.success) {
-      return new OpenDocumentText(tempDir);
+      return new OpenDocumentText(infile, content);
     }
     throw new Error(`Unzip ends with ${status.code}`);
   }
 
-  constructor(dir: string) {
-    this.#dir = dir;
-    this.#contentPath = path.join(dir, "content.xml");
+  constructor(odt: string, content: string) {
+    this.#content = content;
+    this.#odt = odt;
   }
 
-  async injectVar(name: string, value: string) {
-    const content = await this.readContent();
-    const node = findFirstNode(content, {
+  injectVar(name: string, value: string) {
+    const node = findFirstNode(this.#content, {
       node: "text:variable-set",
       attributes: {
         "text:name": name,
@@ -103,64 +118,57 @@ export class OpenDocumentText {
       return;
     }
     this.#unsafe(
-      content,
       node,
       `<text:variable-set text:name="${name}" office:value-type="string">${value}</text:variable-set>`,
     );
   }
 
-  async injectVars(vars: Map<string, string>) {
+  injectVars(vars: Map<string, string>) {
     for (const [name, value] of vars) {
-      // Need to be sync due to content manipulation
-      await this.injectVar(name, value);
+      this.injectVar(name, value);
     }
   }
 
-  async innerXml(
+  innerXml(
     find: { firstNode: FindNodesOptions; lastNode?: FindNodesOptions },
     inner: string,
   ) {
-    const content = await this.readContent();
-    const firstNode = findFirstNode(content, find.firstNode);
+    const firstNode = findFirstNode(this.#content, find.firstNode);
     if (firstNode === undefined) {
       console.warn("Node not found", find);
       return;
     }
     if (find.lastNode === undefined) {
-      this.#unsafe(content, firstNode, inner);
+      this.#unsafe(firstNode, inner);
       return;
     }
-    const lastNode = findLastNode(content, {
+    const lastNode = findLastNode(this.#content, {
       ...find.lastNode,
       start: firstNode.endIndex,
     });
-    this.#unsafe(content, {
+    this.#unsafe({
       index: firstNode.index,
       endIndex: lastNode === undefined ? firstNode.endIndex : lastNode.endIndex,
     }, inner);
   }
 
-  async readContent() {
-    if (this.#content === undefined) {
-      this.#content = await Deno.readTextFile(this.#contentPath);
-    }
-    return this.#content;
-  }
-
-  async writeContent(filename: string = this.#contentPath) {
-    return Deno.writeTextFile(filename, await this.readContent());
-  }
-
   async save(filename: string) {
+    filename = path.resolve(filename);
+    const tempDir = await makeTempDir(path.basename(filename));
     const command = new Deno.Command("zip", {
-      args: ["-q", "-9", "-r", path.resolve(filename), "."],
-      cwd: this.#dir,
+      args: ["-q", "-9", path.resolve(filename), "content.xml"],
+      cwd: tempDir,
       stderr: "inherit",
       stdout: "inherit",
       stdin: "null",
     });
-    await this.writeContent();
-    const status = await command.spawn().status;
+    await Promise.all([
+      // Write destination
+      Deno.copyFile(this.#odt, filename),
+      // Write content.xml in tempdir
+      Deno.writeTextFile(path.join(tempDir, "content.xml"), this.#content),
+    ]);
+    const status = await command.output();
     if (!status.success) {
       throw new Error(`Zip ends with ${status.code}`);
     }
@@ -168,20 +176,18 @@ export class OpenDocumentText {
 
   /**
    * Clone the current instance.
-   * Do not copy content.
    * @returns Clone
    */
   clone(): OpenDocumentText {
-    return new OpenDocumentText(this.dir);
+    return new OpenDocumentText(this.#odt, this.#content);
   }
 
   #unsafe(
-    content: string,
     { index, endIndex }: { index: number; endIndex: number },
     inner: string,
   ) {
-    this.#content = content.substring(0, index) + inner +
-      content.substring(endIndex);
+    this.#content = this.#content.substring(0, index) + inner +
+      this.#content.substring(endIndex);
   }
 }
 
@@ -231,9 +237,11 @@ export class NodeFactory implements CreateNodeOptions {
 
   newNode(options?: Partial<CreateNodeOptions> | string) {
     const { attributes, content, children, node }: CreateNodeOptions =
-      typeof options === "string"
-        ? { ...this.#options, content: options }
-        : { ...this.#options, ...options, attributes: { ...this.#options.attributes, ...options?.attributes } };
+      typeof options === "string" ? { ...this.#options, content: options } : {
+        ...this.#options,
+        ...options,
+        attributes: { ...this.#options.attributes, ...options?.attributes },
+      };
     const attr = Object.entries(attributes)
       .map(([k, v]) => `${k}="${v}"`)
       .join(" ");
@@ -243,7 +251,7 @@ export class NodeFactory implements CreateNodeOptions {
   }
 }
 
-export function* findNodes(
+function* findNodes(
   xml: string,
   options: FindNodesOptions,
 ): Generator<Node> {
@@ -287,10 +295,6 @@ function findLastNode(
     last = node;
   }
   return last;
-}
-
-export function escapeLibreOffice(str: string) {
-  return str.replace(LO_RE, (k) => LO_ENTITIES[k] as string);
 }
 
 function listAttributes(str: string): NodeAttributes {
@@ -352,6 +356,13 @@ function* listNodes(
       lastIndex: index + all.length,
     };
   }
+}
+
+function makeTempDir(prefix?: string) {
+  return Deno.makeTempDir({
+    dir: TEMP_DIR,
+    prefix,
+  });
 }
 
 async function main(args: string[]): Promise<number> {
