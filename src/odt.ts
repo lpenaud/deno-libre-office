@@ -1,7 +1,7 @@
 import * as path from "std/path/mod.ts";
-import { multiMatchs } from "./utils.ts";
+import { multiMatchs, rangeChar } from "./utils.ts";
 
-export type NodeAttributes = Record<string, string>;
+export type NodeAttributes = Record<string, string | undefined>;
 
 interface RawNode {
   end: boolean;
@@ -29,14 +29,19 @@ export interface Node {
   inner: string;
 }
 
-export type NodeType =
-  | "text:p"
-  | "text:span"
+export type NodeTypeTable =
   | "table:table"
   | "table:table-row"
   | "table:table-cell"
   | "table:table-column"
-  | "table:table-header-rows";
+  | "table:table-header-rows"
+  | "table:covered-table-cell";
+
+export type NodeTypeText =
+  | "text:p"
+  | "text:span";
+
+export type NodeType = NodeTypeTable | NodeTypeText;
 
 export interface CreateNodeOptions {
   node: NodeType;
@@ -46,7 +51,7 @@ export interface CreateNodeOptions {
 }
 
 const LO_ENTITIES: Record<string, string> = {
-  "&": "&amp",
+  "&": "&amp;",
   "<": "&lt;",
   ">": "&gt;",
   '"': "&quot;",
@@ -54,7 +59,7 @@ const LO_ENTITIES: Record<string, string> = {
   "\t": "<text:tab />",
   "  ": "<text:tab />",
 };
-const LO_RE = new RegExp(Array.from(Object.keys(LO_ENTITIES)).join("|"), "g");
+const LO_RE = new RegExp(Object.keys(LO_ENTITIES).join("|"), "g");
 const TEMP_DIR = await Deno.makeTempDir({
   prefix: "deno-lo",
 });
@@ -75,6 +80,24 @@ export function removeTempDir() {
   return Deno.remove(TEMP_DIR, {
     recursive: true,
   });
+}
+
+/**
+ * @param tableName Table name
+ * @param columnDef Column definition
+ * @returns The table columns list.
+ */
+export function createColumns(tableName: string, columnDef: string) {
+  const factory = new NodeFactory({
+    node: "table:table-column",
+  });
+  return calcColumns(columnDef).map((c) =>
+    factory.newNode({
+      attributes: {
+        "table:style-name": `${tableName}.${c}`,
+      },
+    })
+  );
 }
 
 export class OpenDocumentText {
@@ -243,12 +266,65 @@ export class NodeFactory implements CreateNodeOptions {
         attributes: { ...this.#options.attributes, ...options?.attributes },
       };
     const attr = Object.entries(attributes)
+      .filter(([, v]) => v !== undefined)
       .map(([k, v]) => `${k}="${v}"`)
       .join(" ");
-    return `<${node} ${attr}>${escapeLibreOffice(content)}${
+    let result = `<${node}`;
+    if (attr.length > 0) {
+      result += ` ${attr}`;
+    }
+    if (content.length === 0 && children.length === 0) {
+      return `${result}/>`;
+    }
+    return `${result}>${escapeLibreOffice(content)}${
       children.join("")
     }</${node}>`;
   }
+}
+
+/**
+ * Create the columns list
+ * @example
+ * calcColumns("A-C")
+ * // ["A", "B", "C"]
+ * calcColumns("E")
+ * // ["E"]
+ * calcColumns("A-BB-E")
+ * // ["A", "B", "B", "C", "D", "E"]
+ * @param columnDef Column definition
+ * @returns List of columns names.
+ */
+function calcColumns(columnDef: string) {
+  if (columnDef.length === 1) {
+    return [columnDef];
+  }
+  const stringFactory: (char: number) => string = (char) =>
+    String.fromCharCode(char);
+  const result: string[] = [];
+  let hyphen = false;
+  let group: number[] = [];
+  for (let i = 0; i < columnDef.length; i++) {
+    const char = columnDef.charCodeAt(i);
+    // 'A' >= char <= 'Z'
+    if (char >= 65 && char <= 90) {
+      if (group.push(char) >= 2 && hyphen) {
+        const end = group.pop() as number;
+        const start = group.pop() as number;
+        result.push(...group.map(stringFactory), ...rangeChar(start, end));
+        group = [];
+      }
+      hyphen = false;
+      continue;
+    }
+    // char === '-'
+    if (char === 45) {
+      hyphen = true;
+    }
+  }
+  if (group.length > 0) {
+    result.push(...group.map(stringFactory));
+  }
+  return result;
 }
 
 function* findNodes(
