@@ -129,21 +129,31 @@ export class OpenDocumentText {
   }
 
   injectVar(name: string, value: string) {
-    const node = findFirstNode(this.#content, {
-      node: "text:variable-set",
-      attributes: {
-        "text:name": name,
-        "office:value-type": "string",
-      },
-    });
-    if (node === undefined) {
-      console.warn(`Cannot find variable "${name}"`);
-      return;
+    const attributes: NodeAttributes = {
+      "text:name": name,
+    };
+    for (
+      const node of findNodes(this.#content, {
+        node: "text:variable-set",
+        attributes,
+      })
+    ) {
+      this.#unsafe(
+        node,
+        `<text:variable-set text:name="${name}" office:value-type="string">${value}</text:variable-set>`,
+      );
     }
-    this.#unsafe(
-      node,
-      `<text:variable-set text:name="${name}" office:value-type="string">${value}</text:variable-set>`,
-    );
+    for (
+      const node of findNodes(this.#content, {
+        node: "text:variable-get",
+        attributes,
+      })
+    ) {
+      this.#unsafe(
+        node,
+        `<text:variable-get text:name="${name}">${value}</text:variable-get>`,
+      );
+    }
   }
 
   injectVars(vars: Map<string, string>) {
