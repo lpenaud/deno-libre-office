@@ -50,6 +50,11 @@ export interface CreateNodeOptions {
   children: string[];
 }
 
+export interface OpenDocumentTextJson {
+  odt: string;
+  content: string;
+}
+
 const LO_ENTITIES: Record<string, string> = {
   "&": "&amp;",
   "<": "&lt;",
@@ -118,12 +123,12 @@ export class OpenDocumentText {
       readAll(process.stdout),
     ]);
     if (status.success) {
-      return new OpenDocumentText(infile, content);
+      return new OpenDocumentText({ odt: infile, content });
     }
     throw new Error(`Unzip ends with ${status.code}`);
   }
 
-  constructor(odt: string, content: string) {
+  constructor({ odt, content }: OpenDocumentTextJson) {
     this.#content = content;
     this.#odt = odt;
   }
@@ -212,7 +217,14 @@ export class OpenDocumentText {
    * @returns Clone
    */
   clone(): OpenDocumentText {
-    return new OpenDocumentText(this.#odt, this.#content);
+    return new OpenDocumentText(this.toJson());
+  }
+
+  toJson(): OpenDocumentTextJson {
+    return {
+      odt: this.#odt,
+      content: this.#content,
+    };
   }
 
   #unsafe(
